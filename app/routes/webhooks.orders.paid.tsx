@@ -305,6 +305,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         {
           variables: {
             input: {
+              name: "available",
               reason: "correction",
               referenceDocumentUri: order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`,
               quantities: quantityUpdates,
