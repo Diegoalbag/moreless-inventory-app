@@ -16,9 +16,8 @@ RUN npm ci && npm cache clean --force
 # Copy source code
 COPY . .
 
-# Generate Prisma client and run migrations
+# Generate Prisma client (migrations will run at startup)
 RUN npx prisma generate
-RUN npx prisma migrate deploy || true
 
 # Build the app
 RUN npm run build
