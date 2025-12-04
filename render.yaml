@@ -19,7 +19,7 @@ services:
       - key: SHOPIFY_APP_URL
         sync: false
       - key: SCOPES
-        value: write_products,read_products,read_orders,write_inventory
+        value: write_products,read_products,read_orders,write_inventory,read_merchant_managed_fulfillment_orders
 
 databases:
   - name: moreless-inventory-db
