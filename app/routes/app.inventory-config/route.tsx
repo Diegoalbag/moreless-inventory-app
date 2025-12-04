@@ -300,21 +300,21 @@ export default function InventoryConfig() {
                 label="Select Product"
                 value={selectedProductId}
                 onChange={(e: any) => {
-                  setSelectedProductId(e.target.value);
+                  setSelectedProductId(e.currentTarget.value);
                   setEditingVariantId(null);
                 }}
               >
-                <option value="">-- Select a product --</option>
+                <s-option value="">-- Select a product --</s-option>
                 {products && products.length > 0 ? (
                   products.map((product) => (
-                    <option key={product.id} value={product.id}>
+                    <s-option key={product.id} value={product.id}>
                       {product.title || `Product ${product.id}`}
-                    </option>
+                    </s-option>
                   ))
                 ) : (
-                  <option value="" disabled>
+                  <s-option value="" disabled>
                     No products found
-                  </option>
+                  </s-option>
                 )}
               </s-select>
               {(!products || products.length === 0) && (
