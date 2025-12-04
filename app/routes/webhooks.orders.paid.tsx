@@ -88,7 +88,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               edges {
                 node {
                   assignedLocation {
-                    id
+                    location {
+                      id
+                    }
                   }
                   lineItems(first: 10) {
                     edges {
@@ -122,12 +124,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const orderData = await orderResponse.json();
     const fulfillmentOrder = orderData.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
     
-    if (!fulfillmentOrder?.assignedLocation?.id) {
+    if (!fulfillmentOrder?.assignedLocation?.location?.id) {
       console.log("No fulfillment location found for order, skipping inventory adjustment");
       return new Response();
     }
 
-    const locationId = fulfillmentOrder.assignedLocation.id;
+    const locationId = fulfillmentOrder.assignedLocation.location.id;
 
     // Process each line item
     for (const lineItem of order.line_items) {
