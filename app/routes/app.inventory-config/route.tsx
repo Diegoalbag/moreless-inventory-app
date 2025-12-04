@@ -100,6 +100,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     productsData.data?.products?.edges?.map((edge) => edge.node) || [];
   
   console.log(`Loaded ${products.length} products for shop ${session.shop}`);
+  if (products.length > 0) {
+    console.log("First product sample:", JSON.stringify(products[0], null, 2));
+  }
 
   // Fetch existing variant rules
   const variantRules = await db.variantRule.findMany({
@@ -193,6 +196,15 @@ export default function InventoryConfig() {
   const { products, variantRules } = useLoaderData<LoaderData>();
   const fetcher = useFetcher();
   const shopify = useAppBridge();
+  
+  // Debug logging
+  useEffect(() => {
+    console.log("Products in component:", products);
+    console.log("Products count:", products?.length || 0);
+    if (products && products.length > 0) {
+      console.log("First product:", products[0]);
+    }
+  }, [products]);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [editingVariantId, setEditingVariantId] = useState<string | null>(null);
   const [ruleType, setRuleType] = useState<"multiplier" | "variety_pack">("multiplier");
@@ -278,9 +290,14 @@ export default function InventoryConfig() {
         <s-stack direction="block" gap="base">
           <s-box padding="base" borderWidth="base" borderRadius="base">
             <s-stack direction="block" gap="base">
-              <s-label for="product-select">Select Product</s-label>
+              {products && products.length > 0 && (
+                <s-text tone="subdued">
+                  Found {products.length} product{products.length !== 1 ? 's' : ''}
+                </s-text>
+              )}
               <s-select
                 id="product-select"
+                label="Select Product"
                 value={selectedProductId}
                 onChange={(e: any) => {
                   setSelectedProductId(e.target.value);
@@ -288,10 +305,10 @@ export default function InventoryConfig() {
                 }}
               >
                 <option value="">-- Select a product --</option>
-                {products.length > 0 ? (
+                {products && products.length > 0 ? (
                   products.map((product) => (
                     <option key={product.id} value={product.id}>
-                      {product.title}
+                      {product.title || `Product ${product.id}`}
                     </option>
                   ))
                 ) : (
@@ -300,7 +317,7 @@ export default function InventoryConfig() {
                   </option>
                 )}
               </s-select>
-              {products.length === 0 && (
+              {(!products || products.length === 0) && (
                 <s-text tone="subdued">
                   No products found in your store. Please create products in your Shopify admin first.
                 </s-text>
