@@ -29,6 +29,8 @@ model Session {
   locale        String?
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
+
+  @@map("Session")
 }
 
 model VariantRule {
