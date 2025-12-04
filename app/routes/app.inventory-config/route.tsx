@@ -49,11 +49,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productsResponse = await admin.graphql(
     `#graphql
       query getProducts {
-        products(first: 250) {
+        products(first: 250, query: "status:active") {
           edges {
             node {
               id
               title
+              status
               variants(first: 100) {
                 edges {
                   node {
@@ -71,9 +72,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     `
   );
 
-  const productsData = await productsResponse.json();
+  const productsData = await productsResponse.json() as {
+    data?: {
+      products?: {
+        edges?: Array<{ node: Product }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+  
+  // Check for GraphQL errors
+  if (productsData.errors && productsData.errors.length > 0) {
+    console.error("GraphQL errors fetching products:", productsData.errors);
+    throw new Response(
+      `Failed to fetch products: ${productsData.errors.map((e) => e.message).join(", ")}`,
+      { status: 500 }
+    );
+  }
+
+  // Check if data exists
+  if (!productsData.data) {
+    console.error("No data in products response:", productsData);
+    throw new Response("Failed to fetch products: No data returned", { status: 500 });
+  }
+
   const products: Product[] =
-    productsData.data?.products?.edges?.map((edge: any) => edge.node) || [];
+    productsData.data?.products?.edges?.map((edge) => edge.node) || [];
+  
+  console.log(`Loaded ${products.length} products for shop ${session.shop}`);
 
   // Fetch existing variant rules
   const variantRules = await db.variantRule.findMany({
@@ -262,12 +288,23 @@ export default function InventoryConfig() {
                 }}
               >
                 <option value="">-- Select a product --</option>
-                {products.map((product) => (
-                  <option key={product.id} value={product.id}>
-                    {product.title}
+                {products.length > 0 ? (
+                  products.map((product) => (
+                    <option key={product.id} value={product.id}>
+                      {product.title}
+                    </option>
+                  ))
+                ) : (
+                  <option value="" disabled>
+                    No products found
                   </option>
-                ))}
+                )}
               </s-select>
+              {products.length === 0 && (
+                <s-text tone="subdued">
+                  No products found in your store. Please create products in your Shopify admin first.
+                </s-text>
+              )}
             </s-stack>
           </s-box>
 
