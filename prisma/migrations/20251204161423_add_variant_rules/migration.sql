@@ -1,13 +1,15 @@
 -- CreateTable
 CREATE TABLE "VariantRule" (
-    "id" TEXT NOT NULL PRIMARY KEY,
+    "id" TEXT NOT NULL,
     "shop" TEXT NOT NULL,
     "variantId" TEXT NOT NULL,
     "type" TEXT NOT NULL,
     "multiplier" INTEGER,
     "varietyPackFlavorIds" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "VariantRule_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateIndex

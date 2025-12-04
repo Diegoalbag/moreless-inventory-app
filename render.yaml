@@ -24,6 +24,6 @@ services:
 databases:
   - name: moreless-inventory-db
     plan: free
-    databaseName: moreless_inventory
-    user: moreless_inventory_user
+    databaseName: morelessinventorydb
+    user: morelessinventorydb_user
 
