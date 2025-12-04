@@ -25,5 +25,5 @@ RUN npm run build
 # Remove dev dependencies after build
 RUN npm prune --production
 
-# Start the server
-CMD ["npm", "run", "start"]
+# Start the server (run migrations first)
+CMD ["sh", "-c", "npm run setup && npm run start"]
