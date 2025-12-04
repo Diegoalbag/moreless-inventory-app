@@ -2,7 +2,7 @@
 
 client_id = "640d3ec2946d3f63df2f064f1c7de6bf"
 name = "moreless-inventory"
-application_url = "https://morelessprotein.com"
+application_url = "https://moreless-inventory-app.onrender.com"
 embedded = true
 
 [build]
