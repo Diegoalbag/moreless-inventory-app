@@ -16,18 +16,17 @@ interface OrderPayload {
 }
 
 /**
- * Webhook handler for orders/paid events.
+ * Webhook handler for orders/cancelled events.
  * 
- * This handler processes both regular orders and subscription orders.
- * When a subscription billing attempt succeeds, Shopify creates an order
- * which triggers the orders/paid webhook, so this handler automatically
- * processes subscription orders as well.
+ * This handler reverses inventory adjustments that were made when the order was paid.
+ * When an order is cancelled, Shopify only restores 1 unit per item, but we need to
+ * restore the correct amounts based on the custom deduction mappings.
  * 
  * The handler:
- * 1. Checks if the order was already processed (idempotency)
+ * 1. Checks if the order was previously processed (must exist in ProcessedOrder table)
  * 2. Retrieves fulfillment location from the order
- * 3. Processes line items and applies custom inventory deduction mappings
- * 4. Adjusts inventory quantities based on configured mappings (target variant + multiplier)
+ * 3. Reverses all inventory adjustments (adds back what was deducted)
+ * 4. Deletes the ProcessedOrder record so the order can be re-processed if re-paid
  */
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, shop, session, topic, payload } = await authenticate.webhook(request);
@@ -48,7 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return new Response();
     }
 
-    // Check if order was already processed (idempotency)
+    // Check if order was previously processed - we can only reverse processed orders
     const existing = await db.processedOrder.findUnique({
       where: {
         shop_orderId: {
@@ -58,21 +57,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       },
     });
 
-    if (existing) {
-      console.log(`Order ${orderId} already processed, skipping`);
+    if (!existing) {
+      console.log(`Order ${orderId} was not processed by our system, skipping reversal`);
       return new Response();
     }
-
-    // Mark order as being processed
-    await db.processedOrder.create({
-      data: {
-        shop,
-        orderId,
-      },
-    });
     
     if (!order.line_items || order.line_items.length === 0) {
-      console.log("Order has no line items, skipping");
+      console.log("Order has no line items, skipping reversal");
+      // Delete the processed order record anyway
+      await db.processedOrder.delete({
+        where: {
+          shop_orderId: {
+            shop,
+            orderId,
+          },
+        },
+      });
       return new Response();
     }
 
@@ -86,7 +86,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       variantRules.map((rule) => [rule.variantId, rule])
     );
 
-    // Process each line item
+    // Process each line item - will reverse the adjustments
     const inventoryAdjustments: Array<{
       inventoryItemId: string;
       locationId: string;
@@ -173,12 +173,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     
     if (!locationId) {
-      console.log("No fulfillment location found for order, skipping inventory adjustment");
+      console.log("No fulfillment location found for order, skipping inventory reversal");
       console.log("Order data:", JSON.stringify(orderData, null, 2));
+      // Delete the processed order record anyway
+      await db.processedOrder.delete({
+        where: {
+          shop_orderId: {
+            shop,
+            orderId,
+          },
+        },
+      });
       return new Response();
     }
 
-    // Process each line item
+    // Process each line item - REVERSE the adjustments
     for (const lineItem of order.line_items) {
       // Skip if inventory is not managed by Shopify
       if (lineItem.variant_inventory_management !== "shopify") {
@@ -227,7 +236,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             JSON.parse(rule.deductionMappings);
           
           if (Array.isArray(mappings) && mappings.length > 0) {
-            // Process each deduction mapping
+            // Process each deduction mapping - REVERSE the deductions
             for (const mapping of mappings) {
               // Get inventory item ID for the target variant
               const targetVariantResponse = await admin.graphql(
@@ -252,8 +261,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               const targetInventoryItemId = targetVariantData.data?.productVariant?.inventoryItem?.id;
 
               if (targetInventoryItemId) {
-                // Deduct quantity × multiplier from the target variant
-                const delta = -(lineItem.quantity * mapping.multiplier);
+                // REVERSE: Add back what was deducted (quantity × multiplier)
+                // Original was: delta = -(lineItem.quantity * mapping.multiplier)
+                // Reverse is: delta = +(lineItem.quantity * mapping.multiplier)
+                const delta = lineItem.quantity * mapping.multiplier;
                 inventoryAdjustments.push({
                   inventoryItemId: targetInventoryItemId,
                   locationId,
@@ -264,12 +275,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               }
             }
             
-            // Add back the inventory that Shopify deducted from the ordered variant
-            // since we're deducting from the target variants instead
+            // REVERSE: Subtract back what we added to the ordered variant
+            // Original was: delta = lineItem.quantity (added back Shopify's default deduction)
+            // Reverse is: delta = -lineItem.quantity (subtract back what we added)
             inventoryAdjustments.push({
               inventoryItemId,
               locationId,
-              delta: lineItem.quantity, // Add back what Shopify deducted
+              delta: -lineItem.quantity,
             });
           }
         } catch (error) {
@@ -278,7 +290,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           if (rule.type === "multiplier") {
             const multiplier = rule.multiplier || 3;
             const additionalDeduction = multiplier - 1;
-            const delta = -(lineItem.quantity * additionalDeduction);
+            // REVERSE: Add back what was deducted
+            // Original was: delta = -(lineItem.quantity * additionalDeduction)
+            // Reverse is: delta = +(lineItem.quantity * additionalDeduction)
+            const delta = lineItem.quantity * additionalDeduction;
             inventoryAdjustments.push({
               inventoryItemId,
               locationId,
@@ -308,17 +323,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 const flavorData = await flavorResponse.json();
                 const flavorInventoryItemId = flavorData.data?.productVariant?.inventoryItem?.id;
                 if (flavorInventoryItemId) {
+                  // REVERSE: Add back what was deducted
+                  // Original was: delta = -lineItem.quantity
+                  // Reverse is: delta = +lineItem.quantity
                   inventoryAdjustments.push({
                     inventoryItemId: flavorInventoryItemId,
                     locationId,
-                    delta: -lineItem.quantity,
+                    delta: lineItem.quantity,
                   });
                 }
               }
+              // REVERSE: Subtract back what we added to the ordered variant
+              // Original was: delta = lineItem.quantity
+              // Reverse is: delta = -lineItem.quantity
               inventoryAdjustments.push({
                 inventoryItemId,
                 locationId,
-                delta: lineItem.quantity,
+                delta: -lineItem.quantity,
               });
             } catch (parseError) {
               console.error(`Error parsing variety pack flavor IDs: ${parseError}`);
@@ -326,17 +347,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
       } else if (rule.type === "multiplier") {
-        // Legacy multiplier rule support
+        // Legacy multiplier rule support - REVERSE
         const multiplier = rule.multiplier || 3;
         const additionalDeduction = multiplier - 1;
-        const delta = -(lineItem.quantity * additionalDeduction);
+        // REVERSE: Add back what was deducted
+        // Original was: delta = -(lineItem.quantity * additionalDeduction)
+        // Reverse is: delta = +(lineItem.quantity * additionalDeduction)
+        const delta = lineItem.quantity * additionalDeduction;
         inventoryAdjustments.push({
           inventoryItemId,
           locationId,
           delta,
         });
       } else if (rule.type === "variety_pack" && rule.varietyPackFlavorIds) {
-        // Legacy variety pack rule support
+        // Legacy variety pack rule support - REVERSE
         try {
           const flavorIds: string[] = JSON.parse(rule.varietyPackFlavorIds);
           for (const flavorId of flavorIds) {
@@ -360,17 +384,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const flavorData = await flavorResponse.json();
             const flavorInventoryItemId = flavorData.data?.productVariant?.inventoryItem?.id;
             if (flavorInventoryItemId) {
+              // REVERSE: Add back what was deducted
+              // Original was: delta = -lineItem.quantity
+              // Reverse is: delta = +lineItem.quantity
               inventoryAdjustments.push({
                 inventoryItemId: flavorInventoryItemId,
                 locationId,
-                delta: -lineItem.quantity,
+                delta: lineItem.quantity,
               });
             }
           }
+          // REVERSE: Subtract back what we added to the ordered variant
+          // Original was: delta = lineItem.quantity
+          // Reverse is: delta = -lineItem.quantity
           inventoryAdjustments.push({
             inventoryItemId,
             locationId,
-            delta: lineItem.quantity,
+            delta: -lineItem.quantity,
           });
         } catch (parseError) {
           console.error(`Error parsing variety pack flavor IDs: ${parseError}`);
@@ -378,7 +408,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    // Apply all inventory adjustments
+    // Apply all inventory adjustments (reversals)
     if (inventoryAdjustments.length > 0) {
       // Consolidate adjustments by inventoryItemId + locationId to avoid duplicates
       const consolidatedAdjustments = new Map<string, { inventoryItemId: string; locationId: string; delta: number }>();
@@ -423,7 +453,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
           const levelData = await levelResponse.json();
           const currentQuantity = levelData.data?.inventoryItem?.inventoryLevel?.quantities?.[0]?.quantity || 0;
-          const newQuantity = Math.max(0, currentQuantity + adj.delta); // delta is negative, so this subtracts
+          // delta is positive for reversals (adding back), so this adds to current quantity
+          const newQuantity = Math.max(0, currentQuantity + adj.delta);
 
           return {
             inventoryItemId: adj.inventoryItemId,
@@ -470,15 +501,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const setQuantitiesData = await setQuantitiesResponse.json();
       
       if (setQuantitiesData.data?.inventorySetQuantities?.userErrors?.length > 0) {
-        console.error("Inventory adjustment errors:", setQuantitiesData.data.inventorySetQuantities.userErrors);
+        console.error("Inventory reversal errors:", setQuantitiesData.data.inventorySetQuantities.userErrors);
       } else {
-        console.log(`Successfully adjusted inventory for order ${orderId}`);
+        console.log(`Successfully reversed inventory adjustments for cancelled order ${orderId}`);
       }
     }
 
+    // Delete the processed order record so it can be re-processed if the order is re-paid
+    await db.processedOrder.delete({
+      where: {
+        shop_orderId: {
+          shop,
+          orderId,
+        },
+      },
+    });
+
     return new Response();
   } catch (error) {
-    console.error(`Error processing order webhook: ${error}`);
+    console.error(`Error processing order cancellation webhook: ${error}`);
     return new Response("Internal Server Error", { status: 500 });
   }
 };

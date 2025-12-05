@@ -231,8 +231,16 @@ export default function InventoryConfig() {
     p.variants.edges.map((edge) => ({
       ...edge.node,
       productTitle: p.title,
+      productId: p.id,
     }))
   );
+  
+  // Get variants from the same product as the variant being edited
+  const getSameProductVariants = (variantId: string) => {
+    const variant = allVariants.find((v) => v.id === variantId);
+    if (!variant) return allVariants;
+    return allVariants.filter((v) => v.productId === variant.productId);
+  };
 
   const getRuleForVariant = (variantId: string) => {
     return variantRules.find((r) => r.variantId === variantId);
@@ -459,29 +467,37 @@ export default function InventoryConfig() {
                                       }
                                     >
                                       <s-option value="">-- Select variant --</s-option>
-                                      {allVariants.map((v) => (
+                                      {getSameProductVariants(variant.id).map((v) => (
                                         <s-option key={v.id} value={v.id}>
-                                          {v.productTitle} - {v.title || "Default"}
+                                          {v.title || "Default"}
                                           {v.sku && ` (${v.sku})`}
                                         </s-option>
                                       ))}
                                     </s-select>
-                                    <s-textfield
+                                    <s-text-field
                                       label="Multiplier"
-                                      type="number"
                                       value={mapping.multiplier.toString()}
-                                      onChange={(e: any) =>
+                                      onChange={(e: any) => {
+                                        const value = parseInt(e.currentTarget.value) || 1;
                                         updateMapping(
                                           index,
                                           "multiplier",
-                                          parseInt(e.target.value) || 1
-                                        )
-                                      }
-                                      min="1"
+                                          Math.max(1, value) // Ensure minimum of 1
+                                        );
+                                      }}
+                                      details="Enter how many units to deduct from the selected variant when 1 unit of this variant is ordered"
                                     />
-                                    <s-text tone="subdued">
-                                      When 1 unit of {variant.title || "this variant"} is ordered, {mapping.multiplier} unit{mapping.multiplier !== 1 ? 's' : ''} will be deducted from the selected variant.
-                                    </s-text>
+                                    {mapping.targetVariantId && (() => {
+                                      const targetVariant = getSameProductVariants(variant.id).find(
+                                        (v) => v.id === mapping.targetVariantId
+                                      );
+                                      const targetVariantName = targetVariant?.title || "selected variant";
+                                      return (
+                                        <s-text tone="subdued">
+                                          When 1 unit of {variant.title || "this variant"} is ordered, {mapping.multiplier} unit{mapping.multiplier !== 1 ? 's' : ''} will be deducted from {targetVariantName}.
+                                        </s-text>
+                                      );
+                                    })()}
                                   </s-stack>
                                 </s-box>
                               ))}
