@@ -4,7 +4,7 @@ import type {
   LoaderFunctionArgs,
   HeadersFunction,
 } from "react-router";
-import { useLoaderData, useFetcher, Form } from "react-router";
+import { useLoaderData, useFetcher } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../../shopify.server";
 import db from "../../db.server";
@@ -25,12 +25,18 @@ interface Product {
   };
 }
 
+interface DeductionMapping {
+  targetVariantId: string;
+  multiplier: number;
+}
+
 interface VariantRule {
   id: string;
   variantId: string;
-  type: string;
+  type: string | null;
   multiplier: number | null;
   varietyPackFlavorIds: string | null;
+  deductionMappings: string | null; // JSON array of DeductionMapping
 }
 
 interface LoaderData {
@@ -116,7 +122,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   if (!session) {
     throw new Response("Unauthorized", { status: 401 });
@@ -127,26 +133,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (action === "save") {
     const variantId = formData.get("variantId") as string;
-    const type = formData.get("type") as string;
-    const multiplier = formData.get("multiplier")
-      ? parseInt(formData.get("multiplier") as string)
-      : null;
-    const varietyPackFlavorIds = formData.get("varietyPackFlavorIds") as string;
+    const deductionMappingsJson = formData.get("deductionMappings") as string;
 
-    if (!variantId || !type) {
-      return { error: "Variant ID and type are required" };
+    if (!variantId) {
+      return { error: "Variant ID is required" };
     }
 
-    // Validate variety pack flavor IDs if type is variety_pack
-    if (type === "variety_pack" && varietyPackFlavorIds) {
-      try {
-        const flavorIds = JSON.parse(varietyPackFlavorIds);
-        if (!Array.isArray(flavorIds) || flavorIds.length !== 3) {
-          return { error: "Variety pack must have exactly 3 flavor variants" };
-        }
-      } catch (error) {
-        return { error: "Invalid variety pack flavor IDs format" };
+    // Validate deduction mappings
+    if (!deductionMappingsJson) {
+      return { error: "Deduction mappings are required" };
+    }
+
+    let deductionMappings: Array<{ targetVariantId: string; multiplier: number }>;
+    try {
+      deductionMappings = JSON.parse(deductionMappingsJson);
+      if (!Array.isArray(deductionMappings) || deductionMappings.length === 0) {
+        return { error: "At least one deduction mapping is required" };
       }
+      for (const mapping of deductionMappings) {
+        if (!mapping.targetVariantId || !mapping.multiplier || mapping.multiplier < 1) {
+          return { error: "Each mapping must have a valid target variant and multiplier >= 1" };
+        }
+      }
+    } catch (error) {
+      return { error: "Invalid deduction mappings format" };
     }
 
     // Upsert the variant rule
@@ -160,14 +170,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: {
         shop: session.shop,
         variantId,
-        type,
-        multiplier,
-        varietyPackFlavorIds: varietyPackFlavorIds || null,
+        deductionMappings: deductionMappingsJson,
       },
       update: {
-        type,
-        multiplier,
-        varietyPackFlavorIds: varietyPackFlavorIds || null,
+        deductionMappings: deductionMappingsJson,
       },
     });
 
@@ -207,9 +213,7 @@ export default function InventoryConfig() {
   }, [products]);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [editingVariantId, setEditingVariantId] = useState<string | null>(null);
-  const [ruleType, setRuleType] = useState<"multiplier" | "variety_pack">("multiplier");
-  const [multiplier, setMultiplier] = useState<number>(3);
-  const [selectedFlavorIds, setSelectedFlavorIds] = useState<string[]>([]);
+  const [deductionMappings, setDeductionMappings] = useState<DeductionMapping[]>([]);
 
   useEffect(() => {
     if (fetcher.data?.success) {
@@ -237,35 +241,61 @@ export default function InventoryConfig() {
   const startEditing = (variantId: string) => {
     const rule = getRuleForVariant(variantId);
     setEditingVariantId(variantId);
-    if (rule) {
-      setRuleType(rule.type as "multiplier" | "variety_pack");
-      setMultiplier(rule.multiplier || 3);
-      if (rule.varietyPackFlavorIds) {
-        try {
-          setSelectedFlavorIds(JSON.parse(rule.varietyPackFlavorIds));
-        } catch {
-          setSelectedFlavorIds([]);
+    if (rule && rule.deductionMappings) {
+      try {
+        const mappings = JSON.parse(rule.deductionMappings);
+        if (Array.isArray(mappings)) {
+          setDeductionMappings(mappings);
+        } else {
+          setDeductionMappings([]);
         }
-      } else {
-        setSelectedFlavorIds([]);
+      } catch {
+        setDeductionMappings([]);
       }
     } else {
-      setRuleType("multiplier");
-      setMultiplier(3);
-      setSelectedFlavorIds([]);
+      setDeductionMappings([]);
     }
   };
 
+  const addMapping = () => {
+    setDeductionMappings([
+      ...deductionMappings,
+      { targetVariantId: "", multiplier: 1 },
+    ]);
+  };
+
+  const updateMapping = (index: number, field: keyof DeductionMapping, value: string | number) => {
+    const updated = [...deductionMappings];
+    updated[index] = { ...updated[index], [field]: value };
+    setDeductionMappings(updated);
+  };
+
+  const removeMapping = (index: number) => {
+    setDeductionMappings(deductionMappings.filter((_, i) => i !== index));
+  };
+
   const handleSave = (variantId: string) => {
+    // Validate mappings
+    if (deductionMappings.length === 0) {
+      shopify.toast.show("Please add at least one deduction mapping", { isError: true });
+      return;
+    }
+
+    for (const mapping of deductionMappings) {
+      if (!mapping.targetVariantId) {
+        shopify.toast.show("Please select a target variant for all mappings", { isError: true });
+        return;
+      }
+      if (mapping.multiplier < 1) {
+        shopify.toast.show("Multiplier must be at least 1", { isError: true });
+        return;
+      }
+    }
+
     const formData = new FormData();
     formData.append("action", "save");
     formData.append("variantId", variantId);
-    formData.append("type", ruleType);
-    if (ruleType === "multiplier") {
-      formData.append("multiplier", multiplier.toString());
-    } else {
-      formData.append("varietyPackFlavorIds", JSON.stringify(selectedFlavorIds));
-    }
+    formData.append("deductionMappings", JSON.stringify(deductionMappings));
     fetcher.submit(formData, { method: "POST" });
   };
 
@@ -282,9 +312,9 @@ export default function InventoryConfig() {
     <s-page heading="Inventory Configuration">
       <s-section heading="Configure Custom Inventory Deduction Rules">
         <s-paragraph>
-          Set up custom inventory deduction rules for your product variants. For
-          3-pack variants, specify a multiplier. For variety packs, select the
-          three flavor variants that should be deducted.
+          Set up custom inventory deduction mappings for your product variants. 
+          For each variant, you can specify which other variants to deduct inventory from 
+          and how much (multiplier) to deduct when this variant is ordered.
         </s-paragraph>
 
         <s-stack direction="block" gap="base">
@@ -349,12 +379,25 @@ export default function InventoryConfig() {
                             {variant.sku && (
                               <s-text tone="subdued"> (SKU: {variant.sku})</s-text>
                             )}
-                            {rule && (
-                              <s-text tone="success">
+                            {rule && rule.deductionMappings && (() => {
+                              try {
+                                const mappings = JSON.parse(rule.deductionMappings);
+                                if (Array.isArray(mappings) && mappings.length > 0) {
+                                  return (
+                                    <s-text tone="success">
+                                      {" "}
+                                      - {mappings.length} mapping{mappings.length !== 1 ? 's' : ''} configured
+                                    </s-text>
+                                  );
+                                }
+                              } catch {
+                                return null;
+                              }
+                            })()}
+                            {rule && !rule.deductionMappings && rule.type && (
+                              <s-text tone="subdued">
                                 {" "}
-                                - {rule.type === "multiplier"
-                                  ? `Multiplier: ${rule.multiplier}x`
-                                  : "Variety Pack"}
+                                - Legacy rule: {rule.type}
                               </s-text>
                             )}
                           </div>
@@ -386,112 +429,74 @@ export default function InventoryConfig() {
                             background="subdued"
                           >
                             <s-stack direction="block" gap="base">
-                              <s-label>Rule Type</s-label>
-                              <s-stack direction="inline" gap="base">
-                                <s-radio
-                                  name={`type-${variant.id}`}
-                                  value="multiplier"
-                                  checked={ruleType === "multiplier"}
-                                  onChange={() => setRuleType("multiplier")}
-                                >
-                                  Multiplier (3-pack)
-                                </s-radio>
-                                <s-radio
-                                  name={`type-${variant.id}`}
-                                  value="variety_pack"
-                                  checked={ruleType === "variety_pack"}
-                                  onChange={() => setRuleType("variety_pack")}
-                                >
-                                  Variety Pack
-                                </s-radio>
-                              </s-stack>
+                              <s-heading>Deduction Mappings</s-heading>
+                              <s-text tone="subdued">
+                                Configure which variants to deduct inventory from and how much when this variant is ordered.
+                              </s-text>
 
-                              {ruleType === "multiplier" && (
-                                <div>
-                                  <s-label for={`multiplier-${variant.id}`}>
-                                    Multiplier
-                                  </s-label>
-                                  <s-textfield
-                                    id={`multiplier-${variant.id}`}
-                                    type="number"
-                                    value={multiplier.toString()}
-                                    onChange={(e: any) =>
-                                      setMultiplier(parseInt(e.target.value) || 3)
-                                    }
-                                    min="1"
-                                  />
-                                  <s-text tone="subdued">
-                                    When 1 unit is ordered, {multiplier} units will be
-                                    deducted from inventory.
-                                  </s-text>
-                                </div>
-                              )}
-
-                              {ruleType === "variety_pack" && (
-                                <div>
-                                  <s-label>Select 3 Flavor Variants</s-label>
-                                  <s-text tone="subdued">
-                                    Select exactly 3 variants. When 1 variety pack is
-                                    ordered, 1 unit will be deducted from each selected
-                                    flavor.
-                                  </s-text>
-                                  <s-stack direction="block" gap="tight">
-                                    {allVariants
-                                      .filter((v) => v.id !== variant.id)
-                                      .map((v) => (
-                                        <s-checkbox
-                                          key={v.id}
-                                          checked={selectedFlavorIds.includes(v.id)}
-                                          onChange={(checked: boolean) => {
-                                            if (checked) {
-                                              if (selectedFlavorIds.length < 3) {
-                                                setSelectedFlavorIds([
-                                                  ...selectedFlavorIds,
-                                                  v.id,
-                                                ]);
-                                              }
-                                            } else {
-                                              setSelectedFlavorIds(
-                                                selectedFlavorIds.filter(
-                                                  (id) => id !== v.id
-                                                )
-                                              );
-                                            }
-                                          }}
-                                          disabled={
-                                            !selectedFlavorIds.includes(v.id) &&
-                                            selectedFlavorIds.length >= 3
-                                          }
-                                        >
+                              {deductionMappings.map((mapping, index) => (
+                                <s-box
+                                  key={index}
+                                  padding="base"
+                                  borderWidth="base"
+                                  borderRadius="base"
+                                >
+                                  <s-stack direction="block" gap="base">
+                                    <s-stack direction="inline" gap="base" alignment="space-between">
+                                      <s-text emphasis="strong">Mapping {index + 1}</s-text>
+                                      <s-button
+                                        variant="tertiary"
+                                        onClick={() => removeMapping(index)}
+                                      >
+                                        Remove
+                                      </s-button>
+                                    </s-stack>
+                                    <s-select
+                                      label="Target Variant"
+                                      value={mapping.targetVariantId}
+                                      onChange={(e: any) =>
+                                        updateMapping(index, "targetVariantId", e.currentTarget.value)
+                                      }
+                                    >
+                                      <s-option value="">-- Select variant --</s-option>
+                                      {allVariants.map((v) => (
+                                        <s-option key={v.id} value={v.id}>
                                           {v.productTitle} - {v.title || "Default"}
                                           {v.sku && ` (${v.sku})`}
-                                        </s-checkbox>
+                                        </s-option>
                                       ))}
-                                  </s-stack>
-                                  {selectedFlavorIds.length > 0 && (
+                                    </s-select>
+                                    <s-textfield
+                                      label="Multiplier"
+                                      type="number"
+                                      value={mapping.multiplier.toString()}
+                                      onChange={(e: any) =>
+                                        updateMapping(
+                                          index,
+                                          "multiplier",
+                                          parseInt(e.target.value) || 1
+                                        )
+                                      }
+                                      min="1"
+                                    />
                                     <s-text tone="subdued">
-                                      Selected: {selectedFlavorIds.length}/3
+                                      When 1 unit of {variant.title || "this variant"} is ordered, {mapping.multiplier} unit{mapping.multiplier !== 1 ? 's' : ''} will be deducted from the selected variant.
                                     </s-text>
-                                  )}
-                                </div>
-                              )}
+                                  </s-stack>
+                                </s-box>
+                              ))}
+
+                              <s-button
+                                variant="secondary"
+                                onClick={addMapping}
+                              >
+                                Add Mapping
+                              </s-button>
 
                               <s-stack direction="inline" gap="base">
                                 <s-button
                                   variant="primary"
-                                  onClick={() => {
-                                    if (
-                                      ruleType === "variety_pack" &&
-                                      selectedFlavorIds.length !== 3
-                                    ) {
-                                      shopify.toast.show(
-                                        "Please select exactly 3 flavor variants",
-                                        { isError: true }
-                                      );
-                                      return;
-                                    }
-                                    handleSave(variant.id);
-                                  }}
+                                  onClick={() => handleSave(variant.id)}
                                   loading={fetcher.state === "submitting"}
                                 >
                                   Save

@@ -15,6 +15,20 @@ interface OrderPayload {
   fulfillment_status?: string;
 }
 
+/**
+ * Webhook handler for orders/paid events.
+ * 
+ * This handler processes both regular orders and subscription orders.
+ * When a subscription billing attempt succeeds, Shopify creates an order
+ * which triggers the orders/paid webhook, so this handler automatically
+ * processes subscription orders as well.
+ * 
+ * The handler:
+ * 1. Checks if the order was already processed (idempotency)
+ * 2. Retrieves fulfillment location from the order
+ * 3. Processes line items and applies custom inventory deduction mappings
+ * 4. Adjusts inventory quantities based on configured mappings (target variant + multiplier)
+ */
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin, shop, session, topic, payload } = await authenticate.webhook(request);
 
@@ -23,6 +37,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   console.log(`Received ${topic} webhook for ${shop}`);
+  console.log(`Order payload:`, JSON.stringify(payload, null, 2));
 
   try {
     const order = payload as OrderPayload;
@@ -124,12 +139,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const orderData = await orderResponse.json();
     const fulfillmentOrder = orderData.data?.order?.fulfillmentOrders?.edges?.[0]?.node;
     
-    if (!fulfillmentOrder?.assignedLocation?.location?.id) {
+    // For subscription orders, fulfillment orders might be SCHEDULED or not yet created
+    // Try to get location from fulfillment order first, then fall back to querying locations
+    let locationId: string | null = null;
+    
+    if (fulfillmentOrder?.assignedLocation?.location?.id) {
+      locationId = fulfillmentOrder.assignedLocation.location.id;
+    } else {
+      // Fallback: Get the first active location for the shop
+      console.log("No fulfillment location found, trying to get shop locations...");
+      const locationsResponse = await admin.graphql(
+        `#graphql
+          query getLocations {
+            locations(first: 1) {
+              edges {
+                node {
+                  id
+                  isActive
+                }
+              }
+            }
+          }
+        `
+      );
+      
+      const locationsData = await locationsResponse.json();
+      const location = locationsData.data?.locations?.edges?.[0]?.node;
+      
+      if (location?.isActive && location.id) {
+        locationId = location.id;
+        console.log(`Using fallback location: ${locationId}`);
+      }
+    }
+    
+    if (!locationId) {
       console.log("No fulfillment location found for order, skipping inventory adjustment");
+      console.log("Order data:", JSON.stringify(orderData, null, 2));
       return new Response();
     }
-
-    const locationId = fulfillmentOrder.assignedLocation.location.id;
 
     // Process each line item
     for (const lineItem of order.line_items) {
@@ -173,27 +220,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         continue;
       }
 
-      if (rule.type === "multiplier") {
-        // For multiplier rules (3-pack variants), deduct quantity × multiplier
-        // Shopify already deducted 1 unit per quantity, so we need to deduct (multiplier - 1) more
-        const multiplier = rule.multiplier || 3;
-        const additionalDeduction = multiplier - 1; // e.g., if multiplier is 3, deduct 2 more (since 1 was already deducted)
-        const delta = -(lineItem.quantity * additionalDeduction);
-        
-        inventoryAdjustments.push({
-          inventoryItemId,
-          locationId,
-          delta,
-        });
-      } else if (rule.type === "variety_pack") {
-        // For variety pack, deduct 1 from each flavor variant
-        if (rule.varietyPackFlavorIds) {
-          try {
-            const flavorIds: string[] = JSON.parse(rule.varietyPackFlavorIds);
-            
-            for (const flavorId of flavorIds) {
-              // Get inventory item ID for each flavor variant
-              const flavorResponse = await admin.graphql(
+      // Check if new deduction mappings format exists
+      if (rule.deductionMappings) {
+        try {
+          const mappings: Array<{ targetVariantId: string; multiplier: number }> = 
+            JSON.parse(rule.deductionMappings);
+          
+          if (Array.isArray(mappings) && mappings.length > 0) {
+            // Process each deduction mapping
+            for (const mapping of mappings) {
+              // Get inventory item ID for the target variant
+              const targetVariantResponse = await admin.graphql(
                 `#graphql
                   query getVariant($id: ID!) {
                     productVariant(id: $id) {
@@ -206,36 +243,137 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 `,
                 {
                   variables: {
-                    id: flavorId,
+                    id: mapping.targetVariantId,
                   },
                 }
               );
 
-              const flavorData = await flavorResponse.json();
-              const flavorInventoryItemId = flavorData.data?.productVariant?.inventoryItem?.id;
+              const targetVariantData = await targetVariantResponse.json();
+              const targetInventoryItemId = targetVariantData.data?.productVariant?.inventoryItem?.id;
 
-              if (flavorInventoryItemId) {
-                // Deduct 1 unit per variety pack ordered from each flavor variant
-                // Shopify already deducted 1 from the variety pack variant itself,
-                // so we need to add that back and deduct from flavors instead
+              if (targetInventoryItemId) {
+                // Deduct quantity × multiplier from the target variant
+                const delta = -(lineItem.quantity * mapping.multiplier);
                 inventoryAdjustments.push({
-                  inventoryItemId: flavorInventoryItemId,
+                  inventoryItemId: targetInventoryItemId,
                   locationId,
-                  delta: -lineItem.quantity,
+                  delta,
                 });
+              } else {
+                console.log(`No inventory item found for target variant ${mapping.targetVariantId}`);
               }
             }
             
-            // Add back the inventory that Shopify deducted from the variety pack variant
-            // since we're deducting from the individual flavors instead
+            // Add back the inventory that Shopify deducted from the ordered variant
+            // since we're deducting from the target variants instead
             inventoryAdjustments.push({
               inventoryItemId,
               locationId,
               delta: lineItem.quantity, // Add back what Shopify deducted
             });
-          } catch (error) {
-            console.error(`Error parsing variety pack flavor IDs: ${error}`);
           }
+        } catch (error) {
+          console.error(`Error parsing deduction mappings: ${error}`);
+          // Fall back to legacy rule types if parsing fails
+          if (rule.type === "multiplier") {
+            const multiplier = rule.multiplier || 3;
+            const additionalDeduction = multiplier - 1;
+            const delta = -(lineItem.quantity * additionalDeduction);
+            inventoryAdjustments.push({
+              inventoryItemId,
+              locationId,
+              delta,
+            });
+          } else if (rule.type === "variety_pack" && rule.varietyPackFlavorIds) {
+            try {
+              const flavorIds: string[] = JSON.parse(rule.varietyPackFlavorIds);
+              for (const flavorId of flavorIds) {
+                const flavorResponse = await admin.graphql(
+                  `#graphql
+                    query getVariant($id: ID!) {
+                      productVariant(id: $id) {
+                        id
+                        inventoryItem {
+                          id
+                        }
+                      }
+                    }
+                  `,
+                  {
+                    variables: {
+                      id: flavorId,
+                    },
+                  }
+                );
+                const flavorData = await flavorResponse.json();
+                const flavorInventoryItemId = flavorData.data?.productVariant?.inventoryItem?.id;
+                if (flavorInventoryItemId) {
+                  inventoryAdjustments.push({
+                    inventoryItemId: flavorInventoryItemId,
+                    locationId,
+                    delta: -lineItem.quantity,
+                  });
+                }
+              }
+              inventoryAdjustments.push({
+                inventoryItemId,
+                locationId,
+                delta: lineItem.quantity,
+              });
+            } catch (parseError) {
+              console.error(`Error parsing variety pack flavor IDs: ${parseError}`);
+            }
+          }
+        }
+      } else if (rule.type === "multiplier") {
+        // Legacy multiplier rule support
+        const multiplier = rule.multiplier || 3;
+        const additionalDeduction = multiplier - 1;
+        const delta = -(lineItem.quantity * additionalDeduction);
+        inventoryAdjustments.push({
+          inventoryItemId,
+          locationId,
+          delta,
+        });
+      } else if (rule.type === "variety_pack" && rule.varietyPackFlavorIds) {
+        // Legacy variety pack rule support
+        try {
+          const flavorIds: string[] = JSON.parse(rule.varietyPackFlavorIds);
+          for (const flavorId of flavorIds) {
+            const flavorResponse = await admin.graphql(
+              `#graphql
+                query getVariant($id: ID!) {
+                  productVariant(id: $id) {
+                    id
+                    inventoryItem {
+                      id
+                    }
+                  }
+                }
+              `,
+              {
+                variables: {
+                  id: flavorId,
+                },
+              }
+            );
+            const flavorData = await flavorResponse.json();
+            const flavorInventoryItemId = flavorData.data?.productVariant?.inventoryItem?.id;
+            if (flavorInventoryItemId) {
+              inventoryAdjustments.push({
+                inventoryItemId: flavorInventoryItemId,
+                locationId,
+                delta: -lineItem.quantity,
+              });
+            }
+          }
+          inventoryAdjustments.push({
+            inventoryItemId,
+            locationId,
+            delta: lineItem.quantity,
+          });
+        } catch (parseError) {
+          console.error(`Error parsing variety pack flavor IDs: ${parseError}`);
         }
       }
     }

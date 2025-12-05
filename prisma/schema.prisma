@@ -37,9 +37,10 @@ model VariantRule {
   id                   String   @id @default(uuid())
   shop                 String
   variantId            String
-  type                 String   // 'multiplier' | 'variety_pack'
-  multiplier           Int?     // For 3-pack variants (default: 3)
-  varietyPackFlavorIds String?  // JSON array of variant IDs for variety pack
+  type                 String?  // 'multiplier' | 'variety_pack' (deprecated, kept for backward compatibility)
+  multiplier           Int?     // For 3-pack variants (default: 3) (deprecated, kept for backward compatibility)
+  varietyPackFlavorIds String?  // JSON array of variant IDs for variety pack (deprecated, kept for backward compatibility)
+  deductionMappings    String?  // JSON array of {targetVariantId: string, multiplier: number}
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
