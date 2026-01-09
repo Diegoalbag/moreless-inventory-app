@@ -568,11 +568,11 @@ export default function InventoryConfig() {
                               })()}
 
                               <s-stack direction="inline" gap="base">
-                                <s-button
+                                <s-button 
                                   variant="primary"
                                   onClick={() => handleSave(variant.id)}
                                   loading={fetcher.state === "submitting"}
-                                >
+                                > 
                                   Save
                                 </s-button>
                                 <s-button
