@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { calculateMultipackInventory } from "../utils/inventory-calculation.server";
 
 interface OrderLineItem {
   variant_id: number;
@@ -474,6 +475,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } else {
         console.log(`Successfully adjusted inventory for order ${orderId}`);
       }
+    }
+
+    // Calculate and update multipack inventory after processing order
+    try {
+      await calculateMultipackInventory(admin, shop);
+    } catch (error) {
+      console.error(`Error calculating multipack inventory after order processing: ${error}`);
+      // Don't fail the webhook if multipack calculation fails
     }
 
     return new Response();

@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { calculateMultipackInventory } from "../utils/inventory-calculation.server";
 
 interface OrderLineItem {
   variant_id: number;
@@ -507,6 +508,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
+    // Calculate and update multipack inventory after reversing order
+    try {
+      await calculateMultipackInventory(admin, shop);
+    } catch (error) {
+      console.error(`Error calculating multipack inventory after order cancellation: ${error}`);
+      // Don't fail the webhook if multipack calculation fails
+    }
+
     // Delete the processed order record so it can be re-processed if the order is re-paid
     await db.processedOrder.delete({
       where: {
@@ -523,4 +532,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return new Response("Internal Server Error", { status: 500 });
   }
 };
+
 

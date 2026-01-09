@@ -9,6 +9,7 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { authenticate } from "../../shopify.server";
 import db from "../../db.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { calculateMultipackInventory } from "../../utils/inventory-calculation.server";
 
 interface Product {
   id: string;
@@ -37,6 +38,7 @@ interface VariantRule {
   multiplier: number | null;
   varietyPackFlavorIds: string | null;
   deductionMappings: string | null; // JSON array of DeductionMapping
+  calculateInventoryForSelfMapping: boolean; // Toggle to calculate inventory when variant maps to itself
 }
 
 interface LoaderData {
@@ -122,7 +124,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   if (!session) {
     throw new Response("Unauthorized", { status: 401 });
@@ -159,6 +161,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { error: "Invalid deduction mappings format" };
     }
 
+    const calculateInventoryForSelfMapping = formData.get("calculateInventoryForSelfMapping") === "true";
+
     // Upsert the variant rule
     await db.variantRule.upsert({
       where: {
@@ -171,11 +175,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         shop: session.shop,
         variantId,
         deductionMappings: deductionMappingsJson,
+        calculateInventoryForSelfMapping,
       },
       update: {
         deductionMappings: deductionMappingsJson,
+        calculateInventoryForSelfMapping,
       },
     });
+
+    // Calculate and update multipack inventory after saving rule
+    try {
+      await calculateMultipackInventory(admin, session.shop);
+    } catch (error) {
+      console.error(`Error calculating multipack inventory after rule save: ${error}`);
+      // Don't fail the action if multipack calculation fails
+    }
 
     return { success: true };
   } else if (action === "delete") {
@@ -191,6 +205,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         variantId,
       },
     });
+
+    // Calculate and update multipack inventory after deleting rule
+    try {
+      await calculateMultipackInventory(admin, session.shop);
+    } catch (error) {
+      console.error(`Error calculating multipack inventory after rule delete: ${error}`);
+      // Don't fail the action if multipack calculation fails
+    }
 
     return { success: true };
   }
@@ -214,6 +236,7 @@ export default function InventoryConfig() {
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [editingVariantId, setEditingVariantId] = useState<string | null>(null);
   const [deductionMappings, setDeductionMappings] = useState<DeductionMapping[]>([]);
+  const [calculateInventoryForSelfMapping, setCalculateInventoryForSelfMapping] = useState<boolean>(false);
 
   useEffect(() => {
     if (fetcher.data?.success) {
@@ -263,6 +286,8 @@ export default function InventoryConfig() {
     } else {
       setDeductionMappings([]);
     }
+    // Load toggle value
+    setCalculateInventoryForSelfMapping(rule?.calculateInventoryForSelfMapping || false);
   };
 
   const addMapping = () => {
@@ -304,6 +329,7 @@ export default function InventoryConfig() {
     formData.append("action", "save");
     formData.append("variantId", variantId);
     formData.append("deductionMappings", JSON.stringify(deductionMappings));
+    formData.append("calculateInventoryForSelfMapping", calculateInventoryForSelfMapping.toString());
     fetcher.submit(formData, { method: "POST" });
   };
 
@@ -508,6 +534,38 @@ export default function InventoryConfig() {
                               >
                                 Add Mapping
                               </s-button>
+
+                              {/* Toggle: Only show if ALL mappings are to different variants (none point to itself) */}
+                              {(() => {
+                                const allMappingsToOtherVariants = deductionMappings.every(
+                                  (mapping) => mapping.targetVariantId !== variant.id
+                                );
+                                
+                                return allMappingsToOtherVariants && deductionMappings.length > 0 ? (
+                                  <s-box
+                                    padding="base"
+                                    borderWidth="base"
+                                    borderRadius="base"
+                                    background="subdued"
+                                  >
+                                    <s-stack direction="block" gap="base">
+                                      <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={calculateInventoryForSelfMapping}
+                                          onChange={(e) => setCalculateInventoryForSelfMapping(e.currentTarget.checked)}
+                                        />
+                                        <s-text>
+                                          Auto-calculate inventory from source variants
+                                        </s-text>
+                                      </label>
+                                      <s-text tone="subdued">
+                                        When enabled, this variant&apos;s inventory will be automatically calculated as the minimum number of complete bundles that can be made from the source variants above. When disabled, the variant will keep its actual inventory and won&apos;t be updated automatically.
+                                      </s-text>
+                                    </s-stack>
+                                  </s-box>
+                                ) : null;
+                              })()}
 
                               <s-stack direction="inline" gap="base">
                                 <s-button
